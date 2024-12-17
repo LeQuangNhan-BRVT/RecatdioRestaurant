@@ -19,13 +19,15 @@ class BookingController extends Controller
     // Hiển thị danh sách booking của user
     public function index()
     {
-        if (!Auth::check()) {
-            return redirect()->route('login');
+        // if (!Auth::check()) {
+        //     return redirect()->route('login');
+        // }
+
+        $bookings = []; // Mặc định là mảng rỗng
+        if (Auth::check()) {
+            $user = Auth::user();
+            $bookings = $user->bookings()->latest()->paginate(10);
         }
-
-        $user = Auth::user();
-        $bookings = $user->bookings()->latest()->paginate(10);
-
         return view('bookings.index', [
             'bookings' => $bookings
         ]);
@@ -41,7 +43,9 @@ class BookingController extends Controller
             ->where('status', 1)
             ->get();
 
-        return view('front.booking', compact('categories'));
+        // Chỉ cho phép đặt bàn kèm món nếu đã đăng nhập
+        $allowWithMenu = Auth::check();
+        return view('front.booking', compact('categories', 'allowWithMenu'));
     }
 
     // Lưu booking mới
@@ -98,6 +102,12 @@ class BookingController extends Controller
                 'menu_items.*.quantity' => 'required_if:menu_items.*.selected,on|integer|min:1|max:10',
             ], []);
 
+            // Kiểm tra nếu là khách vãng lai và chọn đặt bàn kèm món
+            if (!Auth::check() && $request->booking_type == 'with_menu') {
+                return redirect()->back()
+                    ->with('error', 'Khách vãng lai không thể đặt bàn kèm món. Vui lòng đăng nhập để sử dụng tính năng này.')
+                    ->withInput();
+            }
             if ($validator->fails()) {
                 return redirect()->back()
                     ->withErrors($validator)
@@ -112,7 +122,7 @@ class BookingController extends Controller
             session(['booking_data' => $validated]);
             Log::info('Dữ liệu đã lưu vào session:', ['booking_data' => $validated]);
 
-            
+
             return redirect()->route('front.booking.show-confirm');
         } catch (\Exception $e) {
             Log::error('Lỗi trong quá trình store booking:', [
@@ -150,7 +160,7 @@ class BookingController extends Controller
         // Chỉ kiểm tra 'menu_items' nếu là 'with_menu'
         if ($bookingData['booking_type'] == 'with_menu') {
             if (!isset($bookingData['menu_items'])) {
-                
+
                 return redirect()->route('front.booking')->with('error', 'Thiếu thông tin món ăn.');
             }
         }
@@ -185,6 +195,9 @@ class BookingController extends Controller
             $vnp_TmnCode = config('vnpay.tmn_code');
             $vnp_HashSecret = config('vnpay.hash_secret');
             $vnp_ReturnUrl = config('vnpay.return_url');
+            if (auth()->check()) {
+                $vnp_ReturnUrl .= '?user_id=' . auth()->id();
+            }
 
             Log::info('VNPay Config:', [
                 'url' => $vnp_Url,
@@ -202,7 +215,7 @@ class BookingController extends Controller
 
             //Tính cọc 20% tổng tiền
             $depositAmount = ceil($booking->total_amount * 0.2);
-            $vnp_Amount = $depositAmount*100;//Do VN yêu cầu *100
+            $vnp_Amount = $depositAmount * 100; //Do VN yêu cầu *100
             Log::info('Số tiền thanh toán:', ['vnp_amount' => $vnp_Amount]);
 
             $inputData = array(
@@ -345,15 +358,13 @@ class BookingController extends Controller
     public function confirm(Request $request)
     {
         Log::info('--- Bắt đầu phương thức confirm ---', []);
-
-        // Kiểm tra đăng nhập
-        if (!auth()->check()) {
-            Log::warning('Người dùng chưa đăng nhập.');
-            return redirect()->route('login')->with('error', 'Vui lòng đăng nhập để tiếp tục.');
+        $userId = null;
+        if (auth()->check()) {
+            $userId = auth()->id();
+            Log::info('User ID:', ['user_id' => $userId]);
+        } else {
+            Log::info('Khách vãng lai đang đặt bàn.');
         }
-
-        $userId = auth()->id();
-        Log::info('User ID:', ['user_id' => $userId]);
 
         $bookingData = session('booking_data');
         Log::info('Dữ liệu booking từ session:', $bookingData);
@@ -388,7 +399,7 @@ class BookingController extends Controller
         $booking->phone = $bookingData['phone'];
         $booking->booking_date = $bookingData['booking_date'];
         $booking->number_of_people = $bookingData['number_of_people'];
-        $booking->status = 'pending'; 
+        $booking->status = 'pending';
         $booking->special_request = $bookingData['special_request'] ?? null;
         $booking->booking_type = $bookingData['booking_type'];
 
@@ -399,8 +410,13 @@ class BookingController extends Controller
             $booking->save();
             Log::info('Đã tạo booking (chỉ đặt bàn):', ['booking_id' => $booking->id]);
 
-            Log::info('Đặt bàn thành công (không cần thanh toán).', []);
-            return redirect()->route('front.booking.success')->with('success', 'Đặt bàn thành công!');
+            if (is_null($userId)) {
+                Log::info('Đặt bàn thành công cho khách vãng lai (không cần thanh toán).', []);
+                return redirect()->route('front.booking.success')->with('success', 'Đặt bàn thành công!');
+            } else {
+                Log::info('Đặt bàn thành công (không cần thanh toán).', []);
+                return redirect()->route('front.booking.success')->with('success', 'Đặt bàn thành công!');
+            }
         } elseif ($bookingData['booking_type'] == 'with_menu') {
             // Đặt bàn kèm món ăn
             // Tính tổng tiền
@@ -428,7 +444,6 @@ class BookingController extends Controller
                     $bookingMenu->price = $menu->price;
                     $bookingMenu->subtotal = $menu->price * $item['quantity'];
                     $bookingMenu->save();
-                    
                 }
             }
 
@@ -476,7 +491,12 @@ class BookingController extends Controller
             // Kiểm tra chữ ký và xử lý response
             if ($this->validateVNPayResponse($request)) {
                 Log::info('Chữ ký VNPay hợp lệ.', []);
-
+                // Đăng nhập lại cho user nếu có user_id trong request
+                if ($request->has('user_id')) {
+                    $userId = $request->user_id;
+                    Auth::loginUsingId($userId);
+                    Log::info('Đã đăng nhập lại cho user ID:', ['user_id' => $userId]);
+                }
                 if ($request->vnp_ResponseCode == "00") {
                     // Thanh toán thành công
                     Log::info('Thanh toán thành công cho booking:', ['booking_id' => $bookingId]);
@@ -500,14 +520,9 @@ class BookingController extends Controller
                     // Cập nhật trạng thái booking
                     $booking->update([
                         'payment_status' => 'paid',
-                        // Không thay đổi trạng thái đặt bàn, giữ nguyên là 'pending'
-                        // để chờ admin xác nhận
+
                     ]);
-                    // Duy trì session đăng nhập sau khi thanh toán
-                    if (auth()->check()) {
-                        $request->session()->put('user_last_activity', time());
-                        Log::info('Duy trì session đăng nhập cho user ID:', ['user_id' => auth()->id()]);
-                    }
+
                     Log::info('Đã cập nhật trạng thái booking thành paid.', []);
 
                     return redirect()->route('front.booking.success')

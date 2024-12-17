@@ -21,11 +21,14 @@
                             Chỉ đặt bàn
                         </button>
                     </li>
+
+                    @if($allowWithMenu)
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" data-bs-toggle="tab" data-bs-target="#with-menu" type="button">
                             Đặt bàn và chọn món
                         </button>
                     </li>
+                    @endif
                 </ul>
 
                 <div class="tab-content">
